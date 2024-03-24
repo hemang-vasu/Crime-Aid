@@ -1,0 +1,337 @@
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="initial-scale=1, maximum-scale=1,user-scalable=no" />
+
+    <title>Crime-Aid</title>
+
+    <!-- Load the Chart.js library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.4.0/Chart.min.js"></script>
+
+    <link rel="stylesheet" href="https://js.arcgis.com/4.29/esri/themes/light/main.css" />
+
+    <style>
+      html,
+      body {
+        padding: 0;
+        margin: 0;
+        height: 100%;
+        width: 100%;
+        overflow: hidden;
+      }
+    
+      #viewDiv {
+    position: absolute;
+    left: 0;
+    right: 0; /* Change right property to 0 */
+    top: 0;
+    bottom: 0;
+    height: 100%;
+}
+
+    
+    
+      #num-crimes {
+        color: #ed5050;
+        font-size: 36pt;
+        font-weight: bolder;
+        line-height: 0.8;
+      }
+      #avg-safety-rating {
+        color: #149dcf;
+        font-size: 20pt;
+        font-weight: bolder;
+      }
+    </style>
+    
+    <script src="https://js.arcgis.com/4.29/"></script>
+    
+    <script>
+      require([
+        "esri/views/MapView",
+        "esri/WebMap",
+        "esri/widgets/Legend",
+        "esri/widgets/Expand",
+        "esri/widgets/Bookmarks",
+        "esri/core/lang",
+        "esri/core/promiseUtils",
+        "esri/core/reactiveUtils"
+      ], (MapView, WebMap, Legend, Expand, Bookmarks, lang, promiseUtils, reactiveUtils) => {
+        // declare chart variables to update as the user interacts with the sample
+    
+        let crimeTypeChart, safetyRatingChart, totalNumber, avgSafetyRating;
+    
+        // load a web map containing crime statistics
+        // from a portal item
+    
+        const webmap = new WebMap({
+          portalItem: {
+            id: "09a9131a45984aba8a1bc90588349538"
+          }
+        });
+    
+        const view = new MapView({
+          map: webmap,
+          container: "viewDiv",
+          constraints: {
+            minScale: 300000
+          },
+          highlightOptions: {
+            color: "black",
+            haloOpacity: 0.65,
+            fillOpacity: 0.45
+          }
+        });
+    
+        // Add UI elements to the view
+    
+        // Displays instructions to the user for understanding the sample
+        // And places them in an Expand widget instance
+    
+        const titleContent = document.createElement("div");
+        titleContent.style.padding = "15px";
+        titleContent.style.backgroundColor = "white";
+        titleContent.style.width = "500px";
+        titleContent.innerHTML = [
+          "<div id='title' class='esri-widget'>",
+          "<span id='num-crimes'>Crime-Aid</span>   Note: A score of 0-25 is Safe, 25-50 is Moderate, 50-75 is Unsafe, 75-100 is Very Unsafe",
+          "The average safety rating is <span id='avg-safety-rating'>43</span>.",
+          "</div>"
+        ].join(" ");
+    
+        const titleExpand = new Expand({
+          expandIcon: "dashboard",
+          expandTooltip: "Summary stats",
+          view: view,
+          content: titleContent,
+          expanded: view.widthBreakpoint !== "xsmall"
+        });
+        view.ui.add(titleExpand, "top-right");
+    
+        const legendExpand = new Expand({
+          view: view,
+          content: new Legend({
+            view: view
+          }),
+          expanded: view.widthBreakpoint !== "xsmall"
+        });
+        view.ui.add(legendExpand, "bottom-left");
+    
+        reactiveUtils.watch(
+          () => view.widthBreakpoint,
+          (widthBreakpoint) => {
+            titleExpand.expanded = widthBreakpoint !== "xsmall";
+            legendExpand.expanded = widthBreakpoint !== "xsmall";
+          }
+        );
+    
+        const bookmarksWidget = new Bookmarks({
+          view: view
+        });
+    
+        const bookmarksExpand = new Expand({
+          view: view,
+          content: bookmarksWidget
+        });
+        view.ui.add(bookmarksExpand, "top-right");
+    
+        bookmarksWidget.on("select-bookmark", (event) => {
+          bookmarksExpand.expanded = false;
+        });
+    
+        // Displays instructions to the user for understanding the sample
+        // And places them in an Expand widget instance
+    
+        const sampleInstructions = document.createElement("div");
+        sampleInstructions.style.padding = "10px";
+        sampleInstructions.style.backgroundColor = "white";
+        sampleInstructions.style.width = "300px";
+        sampleInstructions.innerHTML = [
+          "<b>Drag</b> the pointer over the data to view stats",
+          "within one mile of the pointer location."
+        ].join(" ");
+    
+        const instructionsExpand = new Expand({
+          expandIcon: "question",
+          expandTooltip: "How to use this sample",
+          view: view,
+          content: sampleInstructions
+        });
+        view.ui.add(instructionsExpand, "top-left");
+    
+        let highlightHandle = null;
+    
+        /**
+         * Create charts and start querying the layer view when
+         * the view is ready and data begins to draw in the view
+         */
+        view.when().then(() => {
+          // Create the charts when the view is ready
+          createCharts();
+    
+          const layer = webmap.layers.getItemAt(0);
+          layer.outFields = ["crime_type", "safety_rating"];
+    
+          view.whenLayerView(layer).then((layerView) => {
+            reactiveUtils
+              .whenOnce(() => !layerView.updating)
+              .then(() => {
+                // Query layer view statistics when the pointer moves
+                view.on("pointer-move", (event) => {
+                  queryStatsOnDrag(layerView, event)
+                    .then(updateCharts)
+                    .catch((error) => {
+                      if (error.name !== "AbortError") {
+                        console.error(error);
+                      }
+                    });
+                });
+              });
+          });
+        });
+    
+        /**
+         * Queries statistics against the layer view at the given screen location
+         */
+        const queryStatsOnDrag = promiseUtils.debounce((layerView, event) => {
+          // create a query object for the highlight and the statistics query
+    
+          const query = layerView.layer.createQuery();
+          query.geometry = view.toMap(event); // converts the screen point to a map point
+          query.distance = 1; // queries all features within 1 mile of the point
+          query.units = "miles";
+    
+          const statsQuery = query.clone();
+    
+          // Create the statistic definitions for querying stats from the layer view
+          // the `onStatisticField` property can reference a field name or a SQL expression
+          // `outStatisticFieldName` is the name of the statistic you will reference in the result
+          // `statisticType` can be sum, avg, min, max, count, stddev
+          const statDefinitions = [
+            // total crimes
+    
+            {
+              onStatisticField: "1",
+              outStatisticFieldName: "total",
+              statisticType: "count"
+            },
+    
+            // crime types
+    
+            {
+              onStatisticField: "CASE WHEN crime_type = 'Burglary' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_burglary",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField: "CASE WHEN crime_type = 'Assault' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_assault",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField: "CASE WHEN crime_type = 'Robbery' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_robbery",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField: "CASE WHEN crime_type = 'Theft' THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_theft",
+              statisticType: "sum"
+            },
+    
+            // average safety rating
+    
+            {
+              onStatisticField: "safety_rating",
+              outStatisticFieldName: "avg_safety_rating",
+              statisticType: "avg"
+            },
+    
+            // safety rating categories
+    
+            {
+              onStatisticField: "CASE WHEN safety_rating >= 4 THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_very_safe",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField: "CASE WHEN safety_rating >= 3 AND safety_rating < 4 THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_safe",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField: "CASE WHEN safety_rating >= 2 AND safety_rating < 3 THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_moderate",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField: "CASE WHEN safety_rating >= 1 AND safety_rating < 2 THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_unsafe",
+              statisticType: "sum"
+            },
+            {
+              onStatisticField: "CASE WHEN safety_rating < 1 THEN 1 ELSE 0 END",
+              outStatisticFieldName: "num_very_unsafe",
+              statisticType: "sum"
+            }
+          ];
+    
+          // add the stat definitions to the statistics query object cloned earlier
+          statsQuery.outStatistics = statDefinitions;
+    
+          // execute the query for all features in the layer view
+          const allStatsResponse = layerView.queryFeatures(statsQuery).then(
+            (response) => {
+              const stats = response.features[0].attributes;
+              return stats;
+            },
+            (e) => {
+              console.error(e);
+            }
+          );
+    
+          // highlight all features within the query distance
+          layerView.queryObjectIds(query).then((ids) => {
+            if (highlightHandle) {
+              highlightHandle.remove();
+              highlightHandle = null;
+            }
+            highlightHandle = layerView.highlight(ids);
+          });
+    
+          // Return the promise that will resolve to the set of statistics
+          return allStatsResponse;
+        });
+    
+        /**
+         * Updates the charts with the data returned from the statistic queries.
+         */
+        function updateCharts(allStats) {
+          const crimeTypeStats = [
+            allStats.num_burglary,
+            allStats.num_assault,
+            allStats.num_robbery,
+            allStats.num_theft
+          ];
+          updateChart(crimeTypeChart, crimeTypeStats);
+    
+          const safetyRatingStats = [
+            allStats.num_very_safe,
+            allStats.num_safe,
+            allStats.num_moderate,
+            allStats.num_unsafe,
+            allStats.num_very_unsafe
+          ];
+          updateChart(safetyRatingChart, safetyRatingStats);
+    
+          // Update the total numbers in the title UI element
+          avgSafetyRating.innerHTML = allStats.avg_safety_rating.toFixed(1);
+          totalNumber.innerHTML = allStats.total;
+        }
+      });
+    </script>
+    </head> <body> 
+      <div id="viewDiv">
+
+      </div> 
+          </canvas> </div> </body> </html>
